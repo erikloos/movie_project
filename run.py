@@ -6,15 +6,14 @@ Tha data is saved in the users profile in the database.
 """
 
 import random
-import os
-import matplotlib.pyplot as plt
-import requests
-from dotenv import load_dotenv
-from movie_storage import movie_storage_sql as storage
 
-load_dotenv()
-API = os.getenv('API')
-API_KEY = os.getenv('API_KEY')
+import matplotlib.pyplot as plt
+
+from movie_storage import movie_storage_sql as storage
+from web.html_generator import generate_website
+from services.movie_api import (get_movie_data_by_id, search_movies_in_api)
+
+
 
 NO_DATABASE_MSG = "No movies in the database"
 
@@ -49,78 +48,6 @@ def get_valid_rating() -> float:
     return round(movie_rating, 1)
 
 
-def validate_and_parse_api_response(
-        movie_info: dict[str, str]
-    ) -> dict[str, str|int|float|None] | None:
-    """Validates the response object and return the extracted movie data."""
-    if movie_info.get("Response") != "True":
-        print("Your movie could not be found")
-        return None
-
-    title = movie_info.get("Title")
-    if not title:
-        print("API Response invalid")
-        return None
-
-    try:
-        imdb_rating = float(movie_info.get("imdbRating"))
-    except (ValueError, TypeError):
-        print("Invalid IMDb-Rating! The movie can not be saved")
-        return None
-
-    try:
-        year = int(movie_info.get("Year"))
-    except (ValueError, TypeError):
-        print("Invalid Year! The movie can not be saved")
-        return None
-
-    poster_url = movie_info.get("Poster")
-
-    if poster_url:
-        poster_url = poster_url.strip()
-
-    if not poster_url or poster_url == "N/A":
-        print("No poster for this movie was found")
-        poster_url = None
-
-    imdb_id = movie_info.get("imdbID")
-    if not imdb_id:
-        print("No IMDb ID was found")
-
-    return {
-        "title": title,
-        "year": year,
-        "imdb_rating": imdb_rating,
-        "poster_url": poster_url,
-        "imdb_id": imdb_id
-    }
-
-
-def make_api_response(params: dict[str, str])-> requests.Response | None:
-    """Gets parameters for the API request and returns a response object if successful."""
-    try:
-        response = requests.get(API, params=params, timeout=5)
-    except requests.exceptions.Timeout:
-        print("Timeout for API Request")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"API Request failed: {e}")
-        return None
-    return response
-
-
-def get_search_api_response(search_title: str) -> requests.Response | None:
-    """Send a movie request by search to the API and return a response object if successful."""
-    params = {"apikey": API_KEY, "s": search_title, "type": "movie"}
-    return make_api_response(params)
-
-
-def get_movie_api_response(imdb_id: str) -> requests.Response | None:
-    """Send a movie request by ID to the API and return a response object if successful."""
-    params = {"apikey": API_KEY, "i": imdb_id}
-    return make_api_response(params)
-
-
 def select_movie_from_api_search() -> str | None:
     """Searches for similar movies in the API Database.
     User chooses a movie, if there are movies found."""
@@ -129,30 +56,27 @@ def select_movie_from_api_search() -> str | None:
         print("Enter a valid title.")
         return None
 
-    response = get_search_api_response(search_title)
-    if response is None:
-        return None
+    title_matches, error = search_movies_in_api(search_title)
 
-    try:
-        movie_info = response.json()
-    except ValueError:
-        print("API Request invalid")
+    if title_matches is None:
+        if error == "api_error":
+            print("API request failed")
+        elif error == "invalid_json":
+            print("Invalid API response")
+        elif error == "not_found":
+            print(f"No movies matching '{search_title}' found")
         return None
-
-    if movie_info.get("Response") != "True":
-        print(f"No movies matching '{search_title}' found")
-        return None
-
-    title_matches = movie_info["Search"]
 
     if len(title_matches) == 1:
-        movie_data = title_matches[0]
-        return movie_data["imdbID"]
+        return title_matches[0]["imdbID"]
 
-    print("0: Exit")
-    for index, movie_data in enumerate(title_matches, 1):
-        print(f"{index}. {movie_data['Title']} ({movie_data['Year']})")
+    print_api_movie_matches(title_matches)
 
+    return choose_api_movie_from_matches(title_matches)
+
+
+def choose_api_movie_from_matches(title_matches: list[dict[str, str]]) -> str | None:
+    """Let user choose a movie from title matches and return the imdbID."""
     while True:
         try:
             user_choice = int(input("Choose the correct movie: ").strip())
@@ -163,9 +87,15 @@ def select_movie_from_api_search() -> str | None:
             print(f"Enter a number between 1 and {len(title_matches)}.")
         except ValueError:
             print("Enter a valid number.")
-
     selected_movie = title_matches[user_choice - 1]
     return selected_movie["imdbID"]
+
+
+def print_api_movie_matches(title_matches: list[dict[str, str]]) -> None:
+    """Print matching movie from API search."""
+    print("0: Exit")
+    for index, movie_data in enumerate(title_matches, 1):
+        print(f"{index}. {movie_data['Title']} ({movie_data['Year']})")
 
 
 def add_movie(user_name: str) -> None:
@@ -176,24 +106,14 @@ def add_movie(user_name: str) -> None:
     if imdb_id is None:
         return
 
-    movie_response = get_movie_api_response(imdb_id)
-
-    if movie_response is None:
-        return
-
-    if movie_response.status_code != 200:
-        print(f"The API request failed with status code {movie_response.status_code}")
-        return
-
-    try:
-        movie_info = movie_response.json()
-    except ValueError:
-        print("API Request invalid")
-        return
-
-    movie_data = validate_and_parse_api_response(movie_info)
-
+    movie_data, error = get_movie_data_by_id(imdb_id)
     if movie_data is None:
+        if error == "api_error":
+            print("API request failed")
+        elif error == "invalid_json":
+            print("Invalid API response")
+        elif error == "invalid_data":
+            print("Movie data is not complete")
         return
 
     storage.save_movie(
@@ -206,28 +126,15 @@ def add_movie(user_name: str) -> None:
         )
 
 
-def select_movie_for_search(user_name: str) -> str | None:
-    """Searches for similar movies in the users profile.
-    User chooses can choose movie, if there are movies found."""
-
-    search_title = input("Enter the movie title: ").strip()
-    if not search_title:
-        return None
-
-    title_matches = storage.search_movies_for_user(user_name, search_title)
-
-    if not title_matches:
-        print(f"No movies with '{search_title}' found")
-        return None
-
-    if len(title_matches) == 1:
-        movie = title_matches[0]
-        return movie["title"]
-
+def print_db_movie_matches(title_matches: list[dict[str, str]]) -> None:
+    """Print matching movie from DB search."""
     print("0: Exit")
     for index, movie_data in enumerate(title_matches, 1):
         print(f"{index}. {movie_data['title']} ({movie_data['year']})")
 
+
+def choose_db_movie_matches(title_matches: list[dict[str, str]]) -> str | None:
+    """Let user choose a movie from database title matches and return the title."""
     while True:
         try:
             user_choice = int(input("Choose the correct movie: ").strip())
@@ -241,6 +148,27 @@ def select_movie_for_search(user_name: str) -> str | None:
 
     selected_movie = title_matches[user_choice - 1]
     return selected_movie["title"]
+
+
+def select_movie_for_search(user_name: str) -> str | None:
+    """Searches for similar movies in the users profile.
+    User chooses can choose movie, if there are movies found."""
+
+    search_title = input("Enter the movie title: ").strip()
+    if not search_title:
+        return None
+
+    title_matches = storage.search_movies_for_user(user_name, search_title)
+    if not title_matches:
+        print(f"No movies with '{search_title}' found")
+        return None
+
+    if len(title_matches) == 1:
+        movie = title_matches[0]
+        return movie["title"]
+
+    print_db_movie_matches(title_matches)
+    return choose_db_movie_matches(title_matches)
 
 
 def list_movies(user_name: str) -> None:
@@ -311,7 +239,7 @@ def sorted_movies(user_name: str, attribute: str, reverse: bool = True) -> None:
 
 def sorted_by_rating(user_name: str) -> None:
     """Print all movies in database by rating (best -> worst)."""
-    sorted_movies(user_name,"imdb_rating", reverse=True)
+    sorted_movies(user_name, "imdb_rating", reverse=True)
 
 
 def sorted_by_year(user_name: str) -> None:
@@ -422,54 +350,6 @@ def rating_histogram(user_name: str) -> None:
     print(f"The histogram was saved as {file_name}")
 
 
-def serialize_movie_grid(user_name: str) -> str:
-    """Serialize movies into HTML-text."""
-    movies = storage.list_movies(user_name)
-
-    movie_output = ""
-    for movie_title, movie_data in movies.items():
-        imdb_id = movie_data.get("imdb_id")
-        imdb_link = f"https://www.imdb.com/title/{imdb_id}/" if imdb_id else "#"
-
-        note = movie_data.get("note") or "No note yet"
-        poster_url = movie_data.get("poster_url") or "https://placehold.co/128x193"
-
-        movie_output += '<li>\n'
-        movie_output += '<div class="movie">\n'
-        movie_output += f'<a href="{imdb_link}" target="_blank">\n'
-        movie_output += f'<img class="movie-poster" src="{poster_url}" title="{note}">\n'
-        movie_output += '</a>\n'
-        movie_output += f'<div class="movie-title">{movie_title}</div>\n'
-        movie_output += f'<div class="movie-year">{movie_data.get("year")}</div>\n'
-        movie_output += (f'<div class="movie-imdb-rating">IMDb:'
-                         f' {movie_data.get("imdb_rating")}</div>\n')
-        movie_output += '</div>\n'
-        movie_output += '</li>\n'
-    return movie_output
-
-
-def get_html_template(file_path: str) -> str:
-    """Loads HTML file"""
-    with open(file_path, "r", encoding="utf-8") as html_file:
-        return html_file.read()
-
-
-def create_page_with_content(new_html_content: str) -> None:
-    """Creates an HTML File with the content."""
-    with open("_static/index.html", "w", encoding="utf-8") as file:
-        file.write(new_html_content)
-
-
-def generate_website(user_name: str) -> None:
-    """Generate a movie website for the current user."""
-    html_content = get_html_template("_static/index_template.html")
-    movie_grid_html = serialize_movie_grid(user_name)
-    new_html_content = html_content.replace("__TEMPLATE_TITLE__", f"{user_name}'s Movie App")
-    new_movie_grid_html = new_html_content.replace("__TEMPLATE_MOVIE_GRID__", movie_grid_html)
-    create_page_with_content(new_movie_grid_html)
-    print("Website was generated successfully.")
-
-
 def add_update_note(user_name: str) -> None:
     """Add, update or clear a movie note for the user."""
     title = select_movie_for_search(user_name)
@@ -552,7 +432,7 @@ def user_menu() -> int | None:
             print("Enter a valid number.\n")
 
 
-def menu() -> int|None:
+def menu() -> int | None:
     """Print the menu of the program and expects an input to do an operation."""
     print(
         "Menu:\n"
